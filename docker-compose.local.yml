@@ -5,5 +5,10 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "3001:3000"
+    volumes:
+      - infinite-canvas-data:/data
     restart: unless-stopped
+
+volumes:
+  infinite-canvas-data:

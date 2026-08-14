@@ -63,6 +63,35 @@ export type WebdavSyncConfig = {
 export type ConfigTabKey = "channels" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
+const CONFIG_API_URL = "/api/config";
+const SERVER_SYNC_DEBOUNCE_MS = 500;
+
+let syncTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleSyncToServer(data: { config: AiConfig; webdav: WebdavSyncConfig }) {
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+        fetch(CONFIG_API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+        }).catch(() => {});
+    }, SERVER_SYNC_DEBOUNCE_MS);
+}
+
+async function fetchServerConfig(): Promise<{ config: AiConfig; webdav: WebdavSyncConfig } | null> {
+    try {
+        const res = await fetch(CONFIG_API_URL);
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (!data.exists || !data.config) return null;
+        return { config: data.config, webdav: data.webdav || defaultWebdavSyncConfig };
+    } catch {
+        return null;
+    }
+}
+
+let serverLoaded = false;
+
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
@@ -194,20 +223,24 @@ export const useConfigStore = create<ConfigStore>()(
             isConfigOpen: false,
             configTab: "channels",
             shouldPromptContinue: false,
-            updateConfig: (key, value) =>
+            updateConfig: (key, value) => {
                 set((state) => ({
                     config: {
                         ...state.config,
                         [key]: value,
                     },
-                })),
-            updateWebdavConfig: (key, value) =>
+                }));
+                scheduleSyncToServer({ config: get().config, webdav: get().webdav });
+            },
+            updateWebdavConfig: (key, value) => {
                 set((state) => ({
                     webdav: {
                         ...state.webdav,
                         [key]: value,
                     },
-                })),
+                }));
+                scheduleSyncToServer({ config: get().config, webdav: get().webdav });
+            },
             isAiConfigReady: (config, model) => isAiConfigReady(config, model),
             openConfigDialog: (shouldPromptContinue = false, configTab = "channels") => set({ isConfigOpen: true, shouldPromptContinue, configTab }),
             setConfigDialogOpen: (isConfigOpen) => set({ isConfigOpen }),
@@ -224,7 +257,7 @@ export const useConfigStore = create<ConfigStore>()(
                 if (!Array.isArray(persistedConfig.channels)) config.channels = [];
                 const channels = normalizeChannels(config);
                 const models = modelOptionsFromChannels(channels);
-                return {
+                const merged = {
                     ...current,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
                     config: {
@@ -249,6 +282,26 @@ export const useConfigStore = create<ConfigStore>()(
                         canvasImageCount: config.canvasImageCount || "3",
                     },
                 };
+                if (!serverLoaded) {
+                    serverLoaded = true;
+                    fetchServerConfig().then((serverData) => {
+                        if (!serverData) return;
+                        const sChannels = normalizeChannels(serverData.config);
+                        const sModels = modelOptionsFromChannels(sChannels);
+                        useConfigStore.setState({
+                            config: {
+                                ...defaultConfig,
+                                ...serverData.config,
+                                channelMode: "local",
+                                apiFormat: normalizeApiFormat(serverData.config.apiFormat),
+                                channels: sChannels,
+                                models: sModels,
+                            },
+                            webdav: { ...defaultWebdavSyncConfig, ...serverData.webdav },
+                        });
+                    });
+                }
+                return merged;
             },
         },
     ),
